@@ -50,6 +50,20 @@ Pick a species in Settings. Idle quirks are hard rate-limited (at most once per 
 - Launch at login, optional soft sound at break start (off by default)
 - Battery-aware: the poll loop backs off while you are away
 
+## Install
+
+Download `NotchEyePet.zip` from the [latest release](https://github.com/itsmaleen/notch-eye-pet/releases/latest), unzip it, and drag `NotchEyePet.app` into `/Applications`. Universal binary, so Apple Silicon and Intel both work. macOS 13 or later.
+
+Or from a terminal:
+
+```bash
+curl -L -o /tmp/NotchEyePet.zip https://github.com/itsmaleen/notch-eye-pet/releases/latest/download/NotchEyePet.zip
+unzip -o -q /tmp/NotchEyePet.zip -d /Applications
+open /Applications/NotchEyePet.app
+```
+
+Look for the eye icon in the menu bar. There is no Dock icon: it is an accessory app by design.
+
 ## Build
 
 ```bash
@@ -58,7 +72,18 @@ swift build && swift test          # pure-logic engine tests
 ./.build/debug/NotchEyePet --probe  # headless signal dump
 ```
 
-Look for the eye icon in the menu bar. Pick "Debug fast (20 s / 5 s)" unless you want to wait 20 minutes.
+Pick "Debug fast (20 s / 5 s)" from the menu bar unless you want to wait 20 minutes to see a break.
+
+### Cutting a release
+
+`Scripts/release.sh` builds a universal bundle, signs it with a Developer ID, notarizes it, and staples the ticket. Signing config is read from `Scripts/signing.env`, which is gitignored:
+
+```bash
+NOTCH_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+NOTCH_NOTARY_PROFILE="notch-eye-pet"
+```
+
+Create the notary profile once with `xcrun notarytool store-credentials`. Without notarization Gatekeeper rejects the download, so the staple is not optional.
 
 ## Docs
 

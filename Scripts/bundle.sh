@@ -8,9 +8,27 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="${1:-debug}"
 APP="$ROOT/build/NotchEyePet.app"
 
+# Signing identity is read from the environment, never committed. Set it in
+# Scripts/signing.env (gitignored) or export it before running:
+#
+#   NOTCH_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+#
+# Unset means ad-hoc, which is fine for local dev but cannot be distributed:
+# Gatekeeper rejects ad-hoc signatures on anything that arrives with a
+# quarantine attribute. See Scripts/release.sh for the distributable path.
+[ -f "$ROOT/Scripts/signing.env" ] && . "$ROOT/Scripts/signing.env"
+IDENTITY="${NOTCH_SIGNING_IDENTITY:-}"
+
 cd "$ROOT"
-swift build -c "$CONFIG" --product NotchEyePet
-BIN="$(swift build -c "$CONFIG" --product NotchEyePet --show-bin-path)/NotchEyePet"
+# UNIVERSAL=1 builds arm64 + x86_64 so the app runs on Intel Macs too. Off by
+# default because it roughly doubles build time and local dev never needs it.
+ARCH_ARGS=()
+if [ "${UNIVERSAL:-0}" = "1" ]; then
+  ARCH_ARGS=(--arch arm64 --arch x86_64)
+fi
+
+swift build -c "$CONFIG" --product NotchEyePet "${ARCH_ARGS[@]}"
+BIN="$(swift build -c "$CONFIG" --product NotchEyePet "${ARCH_ARGS[@]}" --show-bin-path)/NotchEyePet"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -37,8 +55,14 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# Ad-hoc sign so the app has a stable identity for TCC and does not get killed.
-codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || \
-  echo "warning: ad-hoc codesign failed; app may still run"
-
-echo "built $APP"
+if [ -n "$IDENTITY" ]; then
+  # Hardened runtime and a secure timestamp are both prerequisites for
+  # notarization; notarytool rejects the upload without them.
+  codesign --force --sign "$IDENTITY" --timestamp --options runtime "$APP"
+  echo "built $APP (signed: $IDENTITY)"
+else
+  # Ad-hoc gives the app a stable identity for TCC and keeps it from being killed.
+  codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || \
+    echo "warning: ad-hoc codesign failed; app may still run"
+  echo "built $APP (ad-hoc, local use only)"
+fi
