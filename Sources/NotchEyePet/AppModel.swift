@@ -165,6 +165,9 @@ final class AppModel: ObservableObject {
     var statusLine: String {
         switch phase {
         case let .working(progress):
+            // Progress pinned at 1 means the break is due but held back because the last
+            // input is old enough that they may have stepped away. "in 0s" would be a lie.
+            guard progress < 1 else { return "Break ready when you are" }
             let remaining = engine.schedule.workInterval * (1 - progress)
             return "Next break in \(Self.format(remaining))"
         case let .warning(remaining):

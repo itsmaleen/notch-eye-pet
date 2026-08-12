@@ -115,6 +115,118 @@ final class BreakEngineTests: XCTestCase {
         XCTAssertEqual(remaining, 30 - engine.policy.maxTickDelta, accuracy: 0.001)
     }
 
+    // MARK: - Never spend a break on an empty desk
+
+    /// The measured regression: with the clock nearly full, standing up used to keep
+    /// accruing at full rate for the whole 90s before absence registered, so the break
+    /// fired roughly a minute after the user left, played to nobody, reset the clock,
+    /// and was credited as taken.
+    func testStandingUpNearTheEndDoesNotFireABreakAtAnEmptyDesk() {
+        let engine = BreakEngine(schedule: .twentyTwentyTwenty)
+        for _ in 0..<(19 * 60) { engine.tick(delta: 1, sample: sample(idle: 0)) }
+
+        // Walk away: the idle clock climbs from zero, crossing the 90s threshold at 91.
+        for away in 1...120 {
+            engine.tick(delta: 1, sample: sample(idle: TimeInterval(away)))
+            if case .warning = engine.phase {
+                return XCTFail("fired a break at an empty desk \(away)s after they left")
+            }
+            if case .resting = engine.phase {
+                return XCTFail("ran a break at an empty desk \(away)s after they left")
+            }
+        }
+        XCTAssertLessThan(engine.accrued, 20 * 60, "the clock should be draining, not pinned at full")
+
+        // And staying away drains it the rest of the way, so they come back to a fresh
+        // interval rather than an instant ambush.
+        for away in 121...900 { engine.tick(delta: 1, sample: sample(idle: TimeInterval(away))) }
+        XCTAssertEqual(engine.accrued, 0, accuracy: 0.001, "a long absence should empty the clock")
+    }
+
+    /// The hold must not become a stall: the break is owed, and the first keystroke
+    /// after they sit back down should spend it immediately.
+    func testHeldBreakFiresAsSoonAsInputReturns() {
+        let engine = BreakEngine(schedule: .init(workInterval: 60, breakDuration: 10, warningLead: 5))
+        for _ in 0..<60 { engine.tick(delta: 1, sample: sample(idle: 45)) }
+        guard case let .working(progress) = engine.phase else {
+            return XCTFail("expected the break to be held, got \(engine.phase)")
+        }
+        XCTAssertEqual(progress, 1, accuracy: 0.001, "a held break should read as full")
+
+        engine.tick(delta: 1, sample: sample(idle: 0))
+        guard case .warning = engine.phase else {
+            return XCTFail("touching the keyboard should spend the owed break, got \(engine.phase)")
+        }
+    }
+
+    /// A display assertion is positive evidence someone is watching, so the grace window
+    /// must not suppress breaks during a long video. This is the whole point of `passive`.
+    func testPassiveViewingIsExemptFromTheInputGrace() {
+        let engine = BreakEngine(schedule: .init(workInterval: 30, breakDuration: 5, warningLead: 1))
+        for _ in 0..<30 { engine.tick(delta: 1, sample: sample(idle: 600, displayAwake: true)) }
+        guard case .warning = engine.phase else {
+            return XCTFail("a video should still earn a break, got \(engine.phase)")
+        }
+    }
+
+    /// Locking the screen during the warning lead must stand the break down, not run a
+    /// countdown to an empty room.
+    func testLockingDuringWarningAbandonsTheBreak() {
+        let engine = BreakEngine(schedule: .init(workInterval: 20, breakDuration: 5, warningLead: 3))
+        for _ in 0..<20 { engine.tick(delta: 1, sample: sample(idle: 0)) }
+        guard case .warning = engine.phase else { return XCTFail("expected warning") }
+
+        engine.tick(delta: 1, sample: sample(idle: 1, locked: true))
+        guard case .working = engine.phase else {
+            return XCTFail("a locked screen should abandon the pending break, got \(engine.phase)")
+        }
+        XCTAssertEqual(engine.accrued, 0, accuracy: 0.001)
+    }
+
+    /// Walking out mid-break used to score as flawless compliance, because "no input"
+    /// was the proxy for "resting the eyes". It must not reach `.praise`, since the app
+    /// layer turns that transition into a `taken` entry in the ledger and a streak day.
+    func testLeavingDuringTheBreakIsNotCreditedAsTaken() {
+        let engine = BreakEngine(schedule: .init(workInterval: 20, breakDuration: 5, warningLead: 1))
+        for _ in 0..<21 { engine.tick(delta: 1, sample: sample(idle: 0)) }
+        guard case .resting = engine.phase else { return XCTFail("expected resting, got \(engine.phase)") }
+
+        for step in 1...10 {
+            engine.tick(delta: 1, sample: sample(idle: TimeInterval(step), locked: true))
+            if case .praise = engine.phase {
+                return XCTFail("credited a break the user was absent for")
+            }
+        }
+        guard case .working = engine.phase else {
+            return XCTFail("expected a return to working, got \(engine.phase)")
+        }
+    }
+
+    /// Sitting still and actually looking away is the success path, and must survive all
+    /// of the above: no input for the whole break, but present throughout.
+    func testGenuineBreakStillEarnsPraise() {
+        let engine = BreakEngine(schedule: .init(workInterval: 20, breakDuration: 5, warningLead: 1))
+        for _ in 0..<21 { engine.tick(delta: 1, sample: sample(idle: 0)) }
+        guard case .resting = engine.phase else { return XCTFail("expected resting, got \(engine.phase)") }
+
+        // Idle climbs during the break but stays well inside the 90s threshold, which is
+        // exactly what looking away from a present user looks like.
+        for step in 1...5 { engine.tick(delta: 1, sample: sample(idle: TimeInterval(step))) }
+        guard case .praise = engine.phase else {
+            return XCTFail("a genuine break should be praised, got \(engine.phase)")
+        }
+    }
+
+    /// "Take a break now" is an explicit request, so it must bypass the input grace.
+    func testBreakNowIgnoresTheInputGrace() {
+        let engine = BreakEngine(schedule: .twentyTwentyTwenty)
+        engine.breakNow()
+        engine.tick(delta: 1, sample: sample(idle: 60))
+        guard case .warning = engine.phase else {
+            return XCTFail("an explicit request should fire regardless of idle, got \(engine.phase)")
+        }
+    }
+
     /// A negative delta (clock skew) should be clamped to zero rather than rewinding
     /// state or crashing.
     func testNegativeDeltaChangesNothing() {

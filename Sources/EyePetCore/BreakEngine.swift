@@ -39,6 +39,19 @@ public final class BreakEngine {
     /// the hands stopped. Head-yaw confirmation is the opt-in camera lane's job.
     public var complianceFraction: Double = 0.8
 
+    /// How recent the last input must be for a break to actually start.
+    ///
+    /// Between this and `PresenceThresholds.idleAfter` sits an ambiguous window: still
+    /// classified `.active` because the idle clock has not crossed 90s, but the person
+    /// may have already stood up. Firing into that window is how a break ends up playing
+    /// to an empty desk, resetting the clock, and being credited as taken — the user
+    /// then gets no nudge through the next full work interval, which is the opposite of
+    /// what they installed this for.
+    ///
+    /// `.passive` is exempt: a display assertion is positive evidence that something is
+    /// on screen being watched, so input silence there says nothing about absence.
+    public var breakStartInputGrace: TimeInterval = 30
+
     private var phaseElapsed: TimeInterval = 0
     /// Seconds of the current break during which no input arrived.
     private var restStillness: TimeInterval = 0
@@ -81,6 +94,16 @@ public final class BreakEngine {
         phase = .warning(remaining: schedule.warningLead)
     }
 
+    /// The one rule, applied everywhere a break could be spent on an empty desk: if they
+    /// are not there, the absence *is* the break. Clears the clock and goes back to work
+    /// without passing through `.praise`/`.ignored`, so nothing lands in the ledger.
+    private func bankAbsenceAsBreak() {
+        accrued = 0
+        phaseElapsed = 0
+        restStillness = 0
+        phase = .working(progress: 0)
+    }
+
     private var progressFraction: Double {
         guard schedule.workInterval > 0 else { return 0 }
         return min(1, max(0, accrued / schedule.workInterval))
@@ -103,11 +126,14 @@ public final class BreakEngine {
         case .working:
             accrued = max(0, accrued + delta * policy.weight(for: presence))
             if accrued >= schedule.workInterval {
-                // Never ambush someone who is not there. If they are already away,
-                // the absence is itself the break — bank it and reset.
                 if presence == .absent {
-                    accrued = 0
-                    phase = .working(progress: 0)
+                    bankAbsenceAsBreak()
+                } else if sample.clocks.anyInput > breakStartInputGrace && presence != .passive {
+                    // Ambiguous: still reads `.active`, but the last keystroke is old
+                    // enough that they may already be gone. Hold at full rather than
+                    // spend the break on a guess; it fires the moment they touch anything.
+                    accrued = schedule.workInterval
+                    phase = .working(progress: 1)
                 } else {
                     phaseElapsed = 0
                     phase = .warning(remaining: schedule.warningLead)
@@ -117,6 +143,12 @@ public final class BreakEngine {
             }
 
         case .warning:
+            // They left between the pet peeking out and the break starting. Stand down
+            // instead of running a countdown nobody is here to see.
+            if presence == .absent {
+                bankAbsenceAsBreak()
+                break
+            }
             let remaining = schedule.warningLead - phaseElapsed
             if remaining <= 0 {
                 phaseElapsed = 0
@@ -127,6 +159,15 @@ public final class BreakEngine {
             }
 
         case .resting:
+            // A break is far shorter than the 90s idle threshold, so sitting still
+            // through one cannot flip presence by itself. Reaching `.absent` here means
+            // a lock, a display sleep, or a screensaver: they actually left. Abandon the
+            // break rather than let stillness-by-absence score as perfect compliance —
+            // returning to `.working` records no outcome, so it stays out of the ledger.
+            if presence == .absent {
+                bankAbsenceAsBreak()
+                break
+            }
             // Input during the break means they worked through it.
             if sample.clocks.anyInput > delta { restStillness += delta }
             let remaining = schedule.breakDuration - phaseElapsed
