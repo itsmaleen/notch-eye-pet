@@ -50,7 +50,9 @@ final class NotchController {
             expanded: { [weak self] in
                 BreakPanelView(model: model, onOpenSettings: { self?.onOpenSettings?() })
             },
-            compactLeading: { CompactPetView(model: model) },
+            compactLeading: { [weak self] in
+                CompactPetView(model: model, onOpenSettings: { self?.onOpenSettings?() })
+            },
             compactTrailing: { CompactStatusView(model: model) }
         )
 
@@ -107,9 +109,25 @@ final class NotchController {
 /// setup — the face only follows the engine if something observes the model.
 struct CompactPetView: View {
     @ObservedObject var model: AppModel
+    /// Set by `NotchController`. Optional so previews can build the pet standalone.
+    var onOpenSettings: (() -> Void)?
 
     var body: some View {
-        PetView(mood: model.mood, species: model.species)
+        // A `Button` rather than `.onTapGesture`: the gesture recogniser never fires
+        // inside the compact notch (verified), while the break panel's gear button
+        // works, so the button's own hit testing is what the notch window honours.
+        //
+        // This matters because the pet is the most reliable way in. The menu bar item
+        // vanishes with the menu bar in a fullscreen app, and gets hidden behind the
+        // notch entirely once enough apps compete for menu bar space, while the break
+        // panel's gear only exists during a break.
+        Button(action: { onOpenSettings?() }) {
+            PetView(mood: model.mood, species: model.species)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Notch Eye Pet settings")
+        .accessibilityLabel("Open Notch Eye Pet settings")
     }
 }
 

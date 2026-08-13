@@ -32,13 +32,23 @@ final class AppModel: ObservableObject {
     /// never leaves the device.
     private var ledger: BreakLedger
 
-    var scheduleName: String = "20-20-20"
+    /// Display name of the active schedule, matched against `MenuBarController.presets`
+    /// so the menu's checkmark and the settings picker agree about which one is on.
+    /// Resolved in `init`.
+    var scheduleName: String = ""
 
     init(schedule: BreakSchedule = .twentyTwentyTwenty, preferences: Preferences = Preferences()) {
         self.preferences = preferences
-        engine = BreakEngine(schedule: preferences.schedule ?? schedule)
+        let activeSchedule = preferences.schedule ?? schedule
+        engine = BreakEngine(schedule: activeSchedule)
         ledger = preferences.ledger ?? BreakLedger()
-        if let savedName = preferences.scheduleName { scheduleName = savedName }
+        // Looked up in the preset table rather than defaulted to a literal. A hardcoded
+        // string drifts the moment a preset is renamed, which is exactly what happened:
+        // the default read "20-20-20" while the preset was "20-20-20 (20 min / 20 s)",
+        // so a fresh install showed "Custom" for what was really the 20-20-20 preset.
+        scheduleName = preferences.scheduleName
+            ?? MenuBarController.presets.first { $0.schedule == activeSchedule }?.name
+            ?? "Custom"
         if preferences.isPaused { engine.pause() }
         species = preferences.species ?? .dot
     }
