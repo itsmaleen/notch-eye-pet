@@ -68,9 +68,12 @@ Look for the eye icon in the menu bar. There is no Dock icon: it is an accessory
 
 ```bash
 swift build && swift test          # pure-logic engine tests
-./Scripts/run.sh                    # bundles and launches the .app
+./Scripts/run.sh                    # bundles and launches from build/, for a quick look
+./Scripts/install.sh                # copies build/ into /Applications and relaunches
 ./.build/debug/NotchEyePet --probe  # headless signal dump
 ```
+
+Use `install.sh` for anything beyond a quick look. `run.sh` launches the app in place from `build/`, which `bundle.sh` deletes at the start of every build, and `SMAppService` registers whatever path the app runs from, so "Launch at login" enabled from `build/` silently points at a path the next build removes.
 
 Pick "Debug fast (20 s / 5 s)" from the menu bar unless you want to wait 20 minutes to see a break.
 
