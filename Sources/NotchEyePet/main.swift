@@ -19,6 +19,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         model.start()
         menuBar.start()
+        // Assigned before `start()`, which is when the notch captures its content
+        // closures. `settings` is lazy and holds `notch`, so this is resolved here
+        // rather than at construction to keep the two from depending on each other.
+        notch.onOpenSettings = { [weak self] in self?.settings.show() }
         notch.start()
     }
 

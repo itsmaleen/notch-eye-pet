@@ -19,6 +19,13 @@ final class NotchController {
         didSet { preferences.alwaysShowPet = alwaysShowPet }
     }
 
+    /// Opens the settings window from the break panel's gear.
+    ///
+    /// A closure rather than a `SettingsWindowController` reference because that type
+    /// already takes a `NotchController` (it owns the always-show-pet toggle), and
+    /// holding each other directly would be a construction cycle. Assign before `start()`.
+    var onOpenSettings: (() -> Void)?
+
     private let model: AppModel
     private var preferences: Preferences
     private var notch: DynamicNotch<BreakPanelView, CompactPetView, CompactStatusView>?
@@ -38,7 +45,11 @@ final class NotchController {
         notch = DynamicNotch(
             hoverBehavior: .all,
             style: .auto,
-            expanded: { BreakPanelView(model: model) },
+            // The closure body runs once, so the gear's action indirects through
+            // `self.onOpenSettings` at tap time rather than capturing its value here.
+            expanded: { [weak self] in
+                BreakPanelView(model: model, onOpenSettings: { self?.onOpenSettings?() })
+            },
             compactLeading: { CompactPetView(model: model) },
             compactTrailing: { CompactStatusView(model: model) }
         )

@@ -197,6 +197,11 @@ struct PetView: View {
 /// The expanded break UI shown inside the notch.
 struct BreakPanelView: View {
     @ObservedObject var model: AppModel
+    /// Set by `NotchController`. Optional so previews and tests can build the panel
+    /// without a settings window behind it.
+    var onOpenSettings: (() -> Void)?
+
+    @State private var gearHovered = false
 
     var body: some View {
         HStack(spacing: 16) {
@@ -219,10 +224,30 @@ struct BreakPanelView: View {
                 )
                 .frame(width: 34, height: 34)
             }
+
+            settingsGear
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
         .frame(width: 380)
+    }
+
+    /// The break panel is where someone is most likely to want the schedule changed,
+    /// because it is the moment the app is interrupting them. Kept deliberately quiet:
+    /// during `.resting` the instruction is to look away from the screen, so this must
+    /// be findable without competing with the copy for attention.
+    private var settingsGear: some View {
+        Button(action: { onOpenSettings?() }) {
+            Image(systemName: "gearshape.fill")
+                .font(.system(size: 13))
+                .foregroundStyle(.white.opacity(gearHovered ? 0.9 : 0.35))
+                .contentShape(Rectangle())
+                .frame(width: 22, height: 22)
+        }
+        .buttonStyle(.plain)
+        .onHover { gearHovered = $0 }
+        .help("Notch Eye Pet settings")
+        .accessibilityLabel("Open settings")
     }
 
     private var headline: String {
