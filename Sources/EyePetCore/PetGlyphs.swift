@@ -104,6 +104,14 @@ public enum PetGlyphs {
         }
     }
 
+    /// A single representative face for a species, for use where the pet is being
+    /// chosen rather than animated — the settings picker, mainly. Uses the resting
+    /// frame of `.idle` so the preview matches what someone actually sees most of the
+    /// time, rather than a mid-animation pose.
+    public static func previewFrame(for species: PetSpecies) -> String {
+        animation(for: .idle, species: species).frames.first ?? ""
+    }
+
     /// Character indices the blink scheduler swaps for the closed-eye en dash.
     /// Position-based rather than a literal glyph match, so the blink still reads on
     /// frames whose open-eye glyph differs by mood (watching, peeking, ...).

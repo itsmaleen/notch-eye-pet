@@ -197,11 +197,16 @@ struct PetView: View {
 /// The expanded break UI shown inside the notch.
 struct BreakPanelView: View {
     @ObservedObject var model: AppModel
-    /// Set by `NotchController`. Optional so previews and tests can build the panel
-    /// without a settings window behind it.
+    /// All set by `NotchController`. Optional so previews can build the panel standalone.
     var onOpenSettings: (() -> Void)?
+    var onCollapse: (() -> Void)?
+    /// Called on hover so a panel the user is reading does not auto-collapse under them.
+    var onInteraction: (() -> Void)?
 
-    @State private var gearHovered = false
+    /// True during an actual break. The panel is doing two jobs — the break itself, and
+    /// the hand-opened status/controls view — and they want different chrome: a break
+    /// must not offer "take a break now", and controls must not compete with "look away".
+    private var isBreak: Bool { model.phase.isBreakVisible }
 
     var body: some View {
         HStack(spacing: 16) {
@@ -215,8 +220,12 @@ struct BreakPanelView: View {
                     .font(.system(size: 12, design: .rounded))
                     .foregroundStyle(.white.opacity(0.65))
             }
+            // One line each. The control cluster competes for the same row, and a
+            // headline that wraps to "Next break / in 19m 55s" reads as broken layout.
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
 
-            Spacer(minLength: 0)
+            Spacer(minLength: 8)
 
             if case let .resting(remaining) = model.phase {
                 CountdownRing(
@@ -225,29 +234,63 @@ struct BreakPanelView: View {
                 .frame(width: 34, height: 34)
             }
 
-            settingsGear
+            controls
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
-        .frame(width: 380)
+        // Wider than the original 380: the hand-opened panel carries four controls
+        // alongside the status text, which the narrower box could not fit on one line.
+        .frame(width: 470)
+        .onHover { if $0 { onInteraction?() } }
     }
 
-    /// The break panel is where someone is most likely to want the schedule changed,
-    /// because it is the moment the app is interrupting them. Kept deliberately quiet:
-    /// during `.resting` the instruction is to look away from the screen, so this must
-    /// be findable without competing with the copy for attention.
-    private var settingsGear: some View {
-        Button(action: { onOpenSettings?() }) {
-            Image(systemName: "gearshape.fill")
-                .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(gearHovered ? 0.9 : 0.35))
-                .contentShape(Rectangle())
-                .frame(width: 22, height: 22)
+    /// During a break this is the gear alone, deliberately quiet: the instruction is to
+    /// look away from the screen, so controls must not invite looking back at it.
+    /// Otherwise it is the full set, since the panel was opened on purpose.
+    @ViewBuilder
+    private var controls: some View {
+        HStack(spacing: 6) {
+            if !isBreak {
+                iconButton("cup.and.saucer.fill", help: "Take a break now") {
+                    model.engine.breakNow()
+                }
+                iconButton(
+                    isPaused ? "play.fill" : "pause.fill",
+                    help: isPaused ? "Resume" : "Pause"
+                ) {
+                    if isPaused { model.resume() } else { model.pause() }
+                }
+            }
+
+            iconButton("gearshape.fill", help: "Settings", dimmed: isBreak) {
+                onOpenSettings?()
+            }
+
+            if !isBreak {
+                iconButton("xmark", help: "Close") { onCollapse?() }
+            }
+        }
+    }
+
+    private var isPaused: Bool { model.phase == .paused }
+
+    private func iconButton(
+        _ symbol: String,
+        help: String,
+        dimmed: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(dimmed ? 0.45 : 0.8))
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(.white.opacity(dimmed ? 0.06 : 0.12)))
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .onHover { gearHovered = $0 }
-        .help("Notch Eye Pet settings")
-        .accessibilityLabel("Open settings")
+        .help(help)
+        .accessibilityLabel(help)
     }
 
     private var headline: String {
@@ -273,8 +316,17 @@ struct BreakPanelView: View {
         case .ignored:
             "No judgement. Next one in \(AppModel.format(model.engine.schedule.workInterval))."
         default:
-            ""
+            // The hand-opened panel: show what the menu bar would, so opening it is
+            // worth the click rather than just a route to the gear.
+            todayLine
         }
+    }
+
+    private var todayLine: String {
+        let counts = model.todayBreakCounts
+        let streak = model.breakStreak
+        let base = "Today: \(counts.taken) taken · \(counts.ignored) missed"
+        return streak >= 2 ? base + " · \(streak) day streak" : base
     }
 }
 

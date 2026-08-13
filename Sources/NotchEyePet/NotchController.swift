@@ -32,6 +32,16 @@ final class NotchController {
     private var cancellable: AnyCancellable?
     private var presented: Presentation = .hidden
 
+    /// Set by clicking the pet, cleared by the close button, by a break taking over, or
+    /// by `autoCollapseAfter` elapsing. Separate from the phase-driven expansion so a
+    /// user-opened panel and a break-opened one cannot fight over the same state.
+    private var manuallyExpanded = false
+    private var collapseTask: Task<Void, Never>?
+
+    /// A panel opened by hand should not sit there forever if the user wanders off, but
+    /// collapsing under someone mid-click is worse. Hovering the panel restarts this.
+    private let autoCollapseAfter: TimeInterval = 8
+
     private enum Presentation { case hidden, compact, expanded }
 
     init(model: AppModel, preferences: Preferences = Preferences()) {
@@ -45,13 +55,18 @@ final class NotchController {
         notch = DynamicNotch(
             hoverBehavior: .all,
             style: .auto,
-            // The closure body runs once, so the gear's action indirects through
-            // `self.onOpenSettings` at tap time rather than capturing its value here.
+            // The closure bodies run once, so every action indirects through `self` at
+            // tap time rather than capturing a value here.
             expanded: { [weak self] in
-                BreakPanelView(model: model, onOpenSettings: { self?.onOpenSettings?() })
+                BreakPanelView(
+                    model: model,
+                    onOpenSettings: { self?.onOpenSettings?() },
+                    onCollapse: { self?.collapseManualExpansion() },
+                    onInteraction: { self?.deferAutoCollapse() }
+                )
             },
             compactLeading: { [weak self] in
-                CompactPetView(model: model, onOpenSettings: { self?.onOpenSettings?() })
+                CompactPetView(model: model, onTapPet: { self?.expandManually() })
             },
             compactTrailing: { CompactStatusView(model: model) }
         )
@@ -81,8 +96,48 @@ final class NotchController {
         apply(model.phase)
     }
 
+    /// Clicking the pet opens the panel rather than jumping straight to settings: the
+    /// notch is the app's own surface, so the expanded panel can show status and the
+    /// controls together, with settings one clearly-labelled step further in.
+    func expandManually() {
+        guard !model.phase.isBreakVisible else { return }
+        manuallyExpanded = true
+        deferAutoCollapse()
+        apply(model.phase)
+    }
+
+    func collapseManualExpansion() {
+        collapseTask?.cancel()
+        collapseTask = nil
+        manuallyExpanded = false
+        apply(model.phase)
+    }
+
+    /// Restarts the auto-collapse countdown. Called on hover so a panel someone is
+    /// actually reading does not close under them.
+    func deferAutoCollapse() {
+        guard manuallyExpanded else { return }
+        collapseTask?.cancel()
+        collapseTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: .seconds(self.autoCollapseAfter))
+            guard !Task.isCancelled, self.manuallyExpanded else { return }
+            self.collapseManualExpansion()
+        }
+    }
+
     private func apply(_ phase: BreakPhase) {
+        // A real break outranks a hand-opened panel, and clears it so the notch returns
+        // to the compact pet when the break ends instead of staying stuck open.
+        if phase.isBreakVisible, manuallyExpanded {
+            manuallyExpanded = false
+            collapseTask?.cancel()
+            collapseTask = nil
+        }
+
         let target: Presentation = if phase.isBreakVisible {
+            .expanded
+        } else if manuallyExpanded {
             .expanded
         } else if alwaysShowPet, phase != .paused {
             .compact
@@ -110,24 +165,24 @@ final class NotchController {
 struct CompactPetView: View {
     @ObservedObject var model: AppModel
     /// Set by `NotchController`. Optional so previews can build the pet standalone.
-    var onOpenSettings: (() -> Void)?
+    var onTapPet: (() -> Void)?
 
     var body: some View {
         // A `Button` rather than `.onTapGesture`: the gesture recogniser never fires
-        // inside the compact notch (verified), while the break panel's gear button
-        // works, so the button's own hit testing is what the notch window honours.
+        // inside the compact notch (verified), while a button's own hit testing is
+        // what the notch window honours.
         //
-        // This matters because the pet is the most reliable way in. The menu bar item
-        // vanishes with the menu bar in a fullscreen app, and gets hidden behind the
-        // notch entirely once enough apps compete for menu bar space, while the break
-        // panel's gear only exists during a break.
-        Button(action: { onOpenSettings?() }) {
+        // The pet matters as an entry point because it is the one surface that survives
+        // everything else: the menu bar item disappears with the menu bar in a
+        // fullscreen app, and gets pushed behind the notch once enough apps compete for
+        // menu bar space.
+        Button(action: { onTapPet?() }) {
             PetView(mood: model.mood, species: model.species)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Notch Eye Pet settings")
-        .accessibilityLabel("Open Notch Eye Pet settings")
+        .help("Open Notch Eye Pet")
+        .accessibilityLabel("Open Notch Eye Pet")
     }
 }
 
