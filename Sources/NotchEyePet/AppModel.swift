@@ -10,8 +10,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var phase: BreakPhase = .working(progress: 0)
     @Published private(set) var mood: PetMood = .idle
     @Published private(set) var presence: PresenceState = .active
-    @Published private(set) var clocks: IdleClocks = .sample()
     @Published private(set) var species: PetSpecies = .dot
+
+    /// The last sampled clocks. Deliberately *not* `@Published`: no view reads it, and
+    /// by construction it changes on every single tick, so publishing it emitted an
+    /// `objectWillChange` per second that invalidated every SwiftUI observer in the app
+    /// to deliver a value nobody was listening for. Kept as plain state because it is
+    /// useful when debugging the mood resolver.
+    private(set) var clocks: IdleClocks = .sample()
 
     /// Polling cadence. One second is plenty while someone is at the machine — every
     /// signal we read is recency-based, so there is nothing to miss between ticks.
@@ -107,6 +113,37 @@ final class AppModel: ObservableObject {
         tick()
     }
 
+    /// Granularity the published `progress` is rounded to.
+    ///
+    /// The engine recomputes a fresh fraction every tick, so an unrounded value changes
+    /// 1200 times over a 20-minute interval: every observer re-renders every second, and
+    /// an `.animation(_:value:)` keyed on it is retriggered before the previous one has
+    /// settled, so it never stops running. The bar it drives advances about a fiftieth of
+    /// a pixel per second, so none of that buys anything visible.
+    ///
+    /// 1/64 is finer than the pixel grid of the only progress indicator drawn from it
+    /// (a 26pt capsule, 52 pixels at 2x), so nothing visible is lost either way.
+    private static let progressSteps: Double = 64
+
+    /// Rounds a phase's payload to what the UI can actually show, so phases that would
+    /// render identically also *compare* equal and stop churning the view tree.
+    ///
+    /// The countdowns round to whole seconds because that is exactly how `statusLine`
+    /// and `BreakPanelView` print them. Endpoints survive rounding, so the `progress: 1`
+    /// hold (break due, waiting for the user to touch something) is not rounded away.
+    private static func quantized(_ phase: BreakPhase) -> BreakPhase {
+        switch phase {
+        case let .working(progress):
+            return .working(progress: (progress * progressSteps).rounded() / progressSteps)
+        case let .warning(remaining):
+            return .warning(remaining: remaining.rounded())
+        case let .resting(remaining):
+            return .resting(remaining: remaining.rounded())
+        case .praise, .ignored, .paused:
+            return phase
+        }
+    }
+
     private func tick() {
         let now = Date()
         let delta = now.timeIntervalSince(lastTickAt)
@@ -114,16 +151,23 @@ final class AppModel: ObservableObject {
 
         let sample = session.sample()
         let previousPhase = phase
-        let newPhase = engine.tick(delta: delta, sample: sample)
+        let newPhase = Self.quantized(engine.tick(delta: delta, sample: sample))
         recordOutcomeIfNeeded(previousPhase: previousPhase, newPhase: newPhase, at: now)
         playBreakSoundIfNeeded(previousPhase: previousPhase, newPhase: newPhase)
 
         clocks = sample.clocks
-        presence = engine.presence
-        phase = newPhase
-        mood = PetMoodResolver.mood(phase: newPhase, presence: engine.presence, clocks: sample.clocks)
+        let newPresence = engine.presence
+        let newMood = PetMoodResolver.mood(phase: newPhase, presence: newPresence, clocks: sample.clocks)
 
-        let desiredInterval = presence == .absent ? absentTickInterval : activeTickInterval
+        // Assign only on a real change. These are `@Published`, so an unconditional
+        // write emits `objectWillChange` whether or not the value moved — three per
+        // tick, every tick. Guarding them means a steady working state does nothing at
+        // all between the ~64 phase steps of an interval.
+        if presence != newPresence { presence = newPresence }
+        if phase != newPhase { phase = newPhase }
+        if mood != newMood { mood = newMood }
+
+        let desiredInterval = newPresence == .absent ? absentTickInterval : activeTickInterval
         if desiredInterval != currentTickInterval {
             scheduleTimer(interval: desiredInterval)
         }
@@ -174,11 +218,16 @@ final class AppModel: ObservableObject {
 
     var statusLine: String {
         switch phase {
-        case let .working(progress):
-            // Progress pinned at 1 means the break is due but held back because the last
-            // input is old enough that they may have stepped away. "in 0s" would be a lie.
-            guard progress < 1 else { return "Break ready when you are" }
-            let remaining = engine.schedule.workInterval * (1 - progress)
+        case .working:
+            // Read the engine rather than the phase's `progress`: that payload is
+            // quantized before publishing (see `progressSteps`), which is right for a
+            // progress bar and far too coarse for a countdown. `accrued` is unrounded.
+            //
+            // Nothing left to accrue means the break is due but held back because the
+            // last input is old enough that they may have stepped away. "in 0s" would
+            // be a lie.
+            let remaining = engine.schedule.workInterval - engine.accrued
+            guard remaining > 0 else { return "Break ready when you are" }
             return "Next break in \(Self.format(remaining))"
         case let .warning(remaining):
             return "Break in \(Int(remaining.rounded()))s"

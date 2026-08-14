@@ -1,5 +1,88 @@
+import AppKit
 import EyePetCore
 import SwiftUI
+
+/// Hosts `content` in its own layer so an endless motion can be handed to Core Animation
+/// rather than run by SwiftUI.
+///
+/// SwiftUI evaluates its animations on the main thread once per displayed frame, and a
+/// `repeatForever` never settles — so `withAnimation(...repeatForever) { offsetY = -1.5 }`
+/// kept the notch running a full `NSHostingView` layout pass at the display's refresh
+/// rate for the entire life of the app. Measured 2026-08-13 on a 120Hz panel: 7.9% CPU
+/// with the bob versus 0.6% without, for a pet drifting a pt and a half. A
+/// `CABasicAnimation` is handed to the render server once and then costs the app nothing
+/// per frame, which is the only acceptable shape for a motion that never stops in a
+/// process that never quits.
+private struct PerpetualBob<Content: View>: NSViewRepresentable {
+    let isActive: Bool
+    let amplitude: CGFloat
+    let duration: CFTimeInterval
+    let content: Content
+
+    private static var key: String { "pet.bob" }
+
+    final class Coordinator {
+        var controller: NSHostingController<Content>?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        let controller = NSHostingController(rootView: content)
+        // Keep AppKit from consulting `intrinsicContentSize`. On a hosting view that is
+        // not in a window yet, that getter converts through the backing store, the
+        // transform is singular, and AppKit aborts on an assertion. Sizing is answered
+        // by `sizeThatFits` below instead.
+        controller.sizingOptions = []
+        context.coordinator.controller = controller
+        controller.view.wantsLayer = true
+        return controller.view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.controller?.rootView = content
+        guard let layer = view.layer else { return }
+
+        guard isActive else {
+            layer.removeAnimation(forKey: Self.key)
+            return
+        }
+        // The glyph is swapped on every blink and frame step, so this runs constantly.
+        // Re-adding the animation each time would restart the bob mid-arc and make the
+        // pet twitch, so a running one is left alone.
+        guard layer.animation(forKey: Self.key) == nil else { return }
+
+        let bob = CABasicAnimation(keyPath: "transform.translation.y")
+        // Negative is up: `NSHostingView` is flipped, so its layer geometry is too.
+        // Matches the sign the SwiftUI version used on `offsetY`.
+        bob.fromValue = 0
+        bob.toValue = -amplitude
+        bob.duration = duration
+        bob.autoreverses = true
+        bob.repeatCount = .infinity
+        bob.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer.add(bob, forKey: Self.key)
+    }
+
+    /// Without this the representable claims the whole proposal and the compact pill
+    /// stretches; the hosted SwiftUI content already knows its own ideal size.
+    ///
+    /// Measured through the hosting *controller*, which asks SwiftUI directly. Going via
+    /// the view's `fittingSize`/`intrinsicContentSize` instead routes through Auto Layout
+    /// and a backing-store conversion that is singular before the view has a window, and
+    /// AppKit aborts on an assertion there.
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        nsView: NSView,
+        context: Context
+    ) -> CGSize? {
+        context.coordinator.controller?.sizeThatFits(
+            in: proposal.replacingUnspecifiedDimensions(
+                by: CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
+            )
+        )
+    }
+}
 
 /// The pet: a kaomoji-style text glyph, stepped through its mood's frame table.
 ///
@@ -32,6 +115,26 @@ struct PetView: View {
     private var faceKey: FaceKey { FaceKey(mood: mood, species: species) }
 
     var body: some View {
+        // The bob is the one perpetual motion the pet has, so it is the one handed to
+        // Core Animation; `.bounce` and `.droop` are finite and settle, so they stay on
+        // SwiftUI's `offsetY` below.
+        PerpetualBob(
+            isActive: animation.motion == .bob,
+            amplitude: 1.5,
+            duration: 1.2,
+            content: face
+        )
+        .offset(y: offsetY)
+        .task(id: faceKey) { await runAnimation() }
+        .task(id: faceKey) { await scheduleBlink() }
+        .task(id: faceKey) { await applyMotion() }
+        .task(id: faceKey) { await runQuirk() }
+        .accessibilityLabel("Pet is \(mood.rawValue)")
+    }
+
+    /// Everything that actually draws. Still plain SwiftUI: only the transform moved to
+    /// Core Animation, so the glyph renders exactly as it did before.
+    private var face: some View {
         ZStack {
             Text(currentFrame)
                 .font(.system(size: size * 0.62, weight: .semibold, design: .monospaced))
@@ -51,12 +154,6 @@ struct PetView: View {
         }
         .frame(height: size)
         .opacity(animation.dimmed ? 0.6 : 1)
-        .offset(y: offsetY)
-        .task(id: faceKey) { await runAnimation() }
-        .task(id: faceKey) { await scheduleBlink() }
-        .task(id: faceKey) { await applyMotion() }
-        .task(id: faceKey) { await runQuirk() }
-        .accessibilityLabel("Pet is \(mood.rawValue)")
     }
 
     // MARK: - Frame
@@ -147,9 +244,9 @@ struct PetView: View {
         case .still:
             break
         case .bob:
-            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
-                offsetY = -1.5
-            }
+            // Driven by `PerpetualBob` in Core Animation, not from here. Resetting
+            // `offsetY` to 0 above is all this case needs to do.
+            break
         case .bounce:
             for _ in 0..<3 {
                 guard !Task.isCancelled else { return }
@@ -229,7 +326,8 @@ struct BreakPanelView: View {
 
             if case let .resting(remaining) = model.phase {
                 CountdownRing(
-                    progress: 1 - (remaining / max(model.engine.schedule.breakDuration, 1))
+                    progress: 1 - (remaining / max(model.engine.schedule.breakDuration, 1)),
+                    remaining: remaining
                 )
                 .frame(width: 34, height: 34)
             }
@@ -330,17 +428,113 @@ struct BreakPanelView: View {
     }
 }
 
-struct CountdownRing: View {
+/// The break countdown, a ring that fills clockwise from twelve o'clock.
+///
+/// Drawn by Core Animation rather than an animated SwiftUI `.trim`, for the same reason
+/// the pet bobs in Core Animation. `remaining` ticks once a second, so a 0.9s SwiftUI
+/// animation keyed on it never settles, and `.trim` rebuilds the path on every displayed
+/// frame: the whole panel re-rendered at the display's refresh rate for the length of the
+/// break. Measured 2026-08-14 on a 120Hz panel, 12.2% CPU versus 1.0% for this version.
+///
+/// It also looks better. The sweep is handed over once and runs continuously, instead of
+/// being re-tweened toward a new target every second.
+struct CountdownRing: NSViewRepresentable {
+    /// How much of the break has already elapsed, 0...1.
     let progress: Double
+    /// Seconds left, which is how long the rest of the sweep should take.
+    let remaining: TimeInterval
+    var lineWidth: CGFloat = 3
 
-    var body: some View {
-        ZStack {
-            Circle().strokeBorder(.white.opacity(0.15), lineWidth: 3)
-            Circle()
-                .trim(from: 0, to: max(0, min(1, progress)))
-                .stroke(.white.opacity(0.85), style: .init(lineWidth: 3, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-                .animation(.linear(duration: 0.9), value: progress)
+    func makeNSView(context: Context) -> RingView {
+        RingView(lineWidth: lineWidth)
+    }
+
+    func updateNSView(_ view: RingView, context: Context) {
+        view.sweep(from: progress, over: remaining)
+    }
+
+    final class RingView: NSView {
+        private let track = CAShapeLayer()
+        private let sweepLayer = CAShapeLayer()
+        private let lineWidth: CGFloat
+
+        init(lineWidth: CGFloat) {
+            self.lineWidth = lineWidth
+            super.init(frame: .zero)
+            wantsLayer = true
+
+            track.fillColor = .clear
+            track.strokeColor = NSColor.white.withAlphaComponent(0.15).cgColor
+            track.lineWidth = lineWidth
+
+            sweepLayer.fillColor = .clear
+            sweepLayer.strokeColor = NSColor.white.withAlphaComponent(0.85).cgColor
+            sweepLayer.lineWidth = lineWidth
+            sweepLayer.lineCap = .round
+            sweepLayer.strokeEnd = 0
+
+            layer?.addSublayer(track)
+            layer?.addSublayer(sweepLayer)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("not used") }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            let scale = window?.backingScaleFactor ?? 2
+            track.contentsScale = scale
+            sweepLayer.contentsScale = scale
+        }
+
+        override func layout() {
+            super.layout()
+            // The layers are positioned by hand, so the implicit animation AppKit would
+            // otherwise attach to every frame/path change has to be suppressed.
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            let radius = (min(bounds.width, bounds.height) - lineWidth) / 2
+            let center = CGPoint(x: bounds.midX, y: bounds.midY)
+            let path = CGMutablePath()
+            // Unflipped view, so +y is up: start at the top and sweep clockwise, which is
+            // what the SwiftUI version did with `.trim` plus a -90 degree rotation.
+            path.addArc(
+                center: center,
+                radius: max(radius, 0),
+                startAngle: .pi / 2,
+                endAngle: .pi / 2 - 2 * .pi,
+                clockwise: true
+            )
+            for sublayer in [track, sweepLayer] {
+                sublayer.frame = bounds
+                sublayer.path = path
+            }
+            CATransaction.commit()
+        }
+
+        /// Hands the rest of the sweep to the render server in one go.
+        func sweep(from progress: Double, over remaining: TimeInterval) {
+            // `updateNSView` runs every second as the countdown text changes. Re-adding
+            // the animation there would restart the sweep each time and cost exactly what
+            // this class exists to avoid, so a running one is left alone.
+            guard sweepLayer.animation(forKey: "sweep") == nil else { return }
+
+            let start = min(max(progress, 0), 1)
+            guard remaining > 0 else {
+                sweepLayer.strokeEnd = CGFloat(start)
+                return
+            }
+
+            let fill = CABasicAnimation(keyPath: "strokeEnd")
+            fill.fromValue = start
+            fill.toValue = 1
+            fill.duration = remaining
+            fill.timingFunction = CAMediaTimingFunction(name: .linear)
+            // Hold the filled ring rather than snapping back to `strokeEnd` at the end of
+            // the break, which is still 0 on the model layer.
+            fill.fillMode = .forwards
+            fill.isRemovedOnCompletion = false
+            sweepLayer.add(fill, forKey: "sweep")
         }
     }
 }

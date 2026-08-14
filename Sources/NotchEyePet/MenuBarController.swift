@@ -1,5 +1,4 @@
 import AppKit
-import Combine
 import EyePetCore
 import SwiftUI
 
@@ -8,8 +7,14 @@ import SwiftUI
 /// A menu bar presence is not redundant with the notch — it is where the app lives on
 /// Macs with no notch, and it is where the user goes to find settings and to trust that
 /// nothing is running the camera.
+///
+/// The contents are built on demand in `menuNeedsUpdate(_:)` rather than pushed from a
+/// subscription. A menu only has to be right at the instant it opens, and rebuilding it
+/// on every phase change meant ~15 `NSMenuItem` allocations *and* a synchronous XPC
+/// round-trip to `smd` (via `LaunchAtLogin.isEnabled`) on the main thread once a second
+/// for the life of the app, to refresh something nobody was looking at.
 @MainActor
-final class MenuBarController {
+final class MenuBarController: NSObject, NSMenuDelegate {
     /// Preset name/schedule pairs, shared with the settings window so the two surfaces
     /// never drift out of sync about what "20-20-20" means.
     static let presets: [(name: String, schedule: BreakSchedule)] = [
@@ -21,12 +26,12 @@ final class MenuBarController {
     private let model: AppModel
     private let settings: SettingsWindowController
     private let statusItem: NSStatusItem
-    private var cancellable: AnyCancellable?
 
     init(model: AppModel, settings: SettingsWindowController) {
         self.model = model
         self.settings = settings
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        super.init()
     }
 
     func start() {
@@ -37,21 +42,24 @@ final class MenuBarController {
             )
             button.image?.isTemplate = true
         }
-        rebuildMenu()
 
-        cancellable = model.$phase
-            .throttle(for: .seconds(1), scheduler: RunLoop.main, latest: true)
-            .sink { [weak self] _ in self?.rebuildMenu() }
+        // Attached empty; `menuNeedsUpdate(_:)` fills it just before each open.
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.delegate = self
+        statusItem.menu = menu
     }
 
     func stop() {
-        cancellable = nil
         NSStatusBar.system.removeStatusItem(statusItem)
     }
 
-    private func rebuildMenu() {
-        let menu = NSMenu()
-        menu.autoenablesItems = false
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        rebuildMenu(menu)
+    }
+
+    private func rebuildMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
 
         let status = NSMenuItem(title: model.statusLine, action: nil, keyEquivalent: "")
         status.isEnabled = false
@@ -106,8 +114,6 @@ final class MenuBarController {
 
         menu.addItem(.separator())
         menu.addItem(action("Quit", #selector(quit)))
-
-        statusItem.menu = menu
     }
 
     private var isPaused: Bool { model.phase == .paused }
@@ -127,23 +133,23 @@ final class MenuBarController {
         }
     }
 
-    @objc private func breakNow() { model.engine.breakNow(); rebuildMenu() }
-    @objc private func skip() { model.engine.skip(); rebuildMenu() }
+    // None of these rebuild the menu: picking an item closes it, and the next open
+    // rebuilds from scratch.
+
+    @objc private func breakNow() { model.engine.breakNow() }
+    @objc private func skip() { model.engine.skip() }
 
     @objc private func togglePause() {
         if isPaused { model.resume() } else { model.pause() }
-        rebuildMenu()
     }
 
     @objc private func pickSchedule(_ sender: NSMenuItem) {
         guard let box = sender.representedObject as? ScheduleBox else { return }
         model.apply(schedule: box.schedule, named: box.name)
-        rebuildMenu()
     }
 
     @objc private func toggleLaunchAtLogin() {
         LaunchAtLogin.setEnabled(!LaunchAtLogin.isEnabled)
-        rebuildMenu()
     }
 
     @objc private func openSettings() { settings.show() }

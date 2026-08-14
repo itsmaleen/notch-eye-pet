@@ -200,7 +200,15 @@ struct CompactStatusView: View {
             .overlay(alignment: .leading) {
                 Capsule()
                     .fill(tint)
-                    .frame(width: 26 * progress, height: 4)
+                    .frame(width: 26, height: 4)
+                    // A transform rather than an animated `frame(width:)`, so a change
+                    // resolves without a layout pass and a fresh `Capsule.path`.
+                    //
+                    // Measured as a wash on its own (2026-08-13): with `progress`
+                    // quantized upstream this animation fires ~64 times per interval
+                    // instead of every tick, so there is little left for it to cost
+                    // either way. Kept because it is the cheaper shape of the two.
+                    .scaleEffect(x: progress, y: 1, anchor: .leading)
                     .animation(.linear(duration: 0.9), value: progress)
             }
     }
