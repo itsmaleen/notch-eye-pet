@@ -257,6 +257,35 @@ final class BreakEngineTests: XCTestCase {
         XCTAssertEqual(engine.phase, .ignored)
     }
 
+    // MARK: - Skip
+
+    /// The panel's escape hatch: skipping mid-rest goes straight back to a fresh
+    /// clock without passing through `.praise`/`.ignored`, so nothing is recorded.
+    func testSkipDuringRestResetsTheClock() {
+        let engine = BreakEngine(schedule: .init(workInterval: 20, breakDuration: 10, warningLead: 1))
+        for _ in 0..<21 { engine.tick(delta: 1, sample: sample(idle: 1)) }
+        for _ in 0..<3 { engine.tick(delta: 1, sample: sample(idle: 1)) }
+        guard case .resting = engine.phase else { return XCTFail("expected resting, got \(engine.phase)") }
+
+        engine.skip()
+        XCTAssertEqual(engine.phase, .working(progress: 0))
+
+        // The next break only fires after a full fresh work interval.
+        for _ in 0..<19 { engine.tick(delta: 1, sample: sample(idle: 1)) }
+        guard case .working = engine.phase else { return XCTFail("expected still working, got \(engine.phase)") }
+        engine.tick(delta: 1, sample: sample(idle: 1))
+        guard case .warning = engine.phase else { return XCTFail("expected warning, got \(engine.phase)") }
+    }
+
+    func testSkipDuringWarningAbandonsTheBreak() {
+        let engine = BreakEngine(schedule: .init(workInterval: 20, breakDuration: 10, warningLead: 5))
+        for _ in 0..<21 { engine.tick(delta: 1, sample: sample(idle: 1)) }
+        guard case .warning = engine.phase else { return XCTFail("expected warning, got \(engine.phase)") }
+
+        engine.skip()
+        XCTAssertEqual(engine.phase, .working(progress: 0))
+    }
+
     // MARK: - Mood
 
     func testMoodFollowsActivityTexture() {
