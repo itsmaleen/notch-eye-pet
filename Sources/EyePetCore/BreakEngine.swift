@@ -21,6 +21,16 @@ public enum BreakPhase: Sendable, Equatable {
         case .working, .paused: false
         }
     }
+
+    /// A break is imminent or running and can still be called off. Drives the panel's
+    /// skip button. Exhaustive on purpose, like `isBreakVisible`: a new phase must
+    /// decide its skippability to compile.
+    public var isSkippable: Bool {
+        switch self {
+        case .warning, .resting: true
+        case .working, .praise, .ignored, .paused: false
+        }
+    }
 }
 
 /// Drives break scheduling from presence samples. Pure: no timers, no AppKit, no I/O —
@@ -78,12 +88,21 @@ public final class BreakEngine {
         phase = .working(progress: progressFraction)
     }
 
-    /// Skip the pending break. Counts as ignored, and resets the clock.
+    /// Skip the break and reset the clock, recording nothing in the ledger: bailing
+    /// on a break is not a stat to guilt anyone over. From `.working` this discards
+    /// accrued time, pushing the next break out a full interval (the menu bar's
+    /// "Skip this one" before a break has fired). During the `.praise`/`.ignored`
+    /// hold it is a no-op, so a stale click cannot cut the reaction short.
     public func skip() {
-        accrued = 0
-        phaseElapsed = 0
-        restStillness = 0
-        phase = .working(progress: 0)
+        switch phase {
+        case .praise, .ignored: return
+        case .working, .warning, .resting, .paused: break
+        }
+        resetClock()
+        // Skipping while paused must not fabricate a running phase: `tick` early-
+        // returns while paused, so `.working` here would wedge the engine behind a
+        // UI that claims the clock is running.
+        if isPaused { phase = .paused }
     }
 
     /// Force a break right now.
@@ -95,9 +114,14 @@ public final class BreakEngine {
     }
 
     /// The one rule, applied everywhere a break could be spent on an empty desk: if they
-    /// are not there, the absence *is* the break. Clears the clock and goes back to work
-    /// without passing through `.praise`/`.ignored`, so nothing lands in the ledger.
+    /// are not there, the absence *is* the break.
     private func bankAbsenceAsBreak() {
+        resetClock()
+    }
+
+    /// Clears the clock and goes back to work without passing through
+    /// `.praise`/`.ignored`, so nothing lands in the ledger.
+    private func resetClock() {
         accrued = 0
         phaseElapsed = 0
         restStillness = 0

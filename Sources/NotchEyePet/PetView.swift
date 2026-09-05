@@ -343,10 +343,10 @@ struct BreakPanelView: View {
     }
 
     /// During a break the chrome stays deliberately quiet — the instruction is to look
-    /// away from the screen, so controls must not invite looking back at it — but a
-    /// skip button is always there: a break with no way out is the kind that gets the
-    /// app disabled, and retention is the product. Otherwise it is the full set, since
-    /// the panel was opened on purpose.
+    /// away from the screen, so controls must not invite looking back at it — except
+    /// for one full-brightness skip button: a break with no way out is the kind that
+    /// gets the app disabled, and retention is the product. Otherwise it is the full
+    /// set, since the panel was opened on purpose.
     @ViewBuilder
     private var controls: some View {
         HStack(spacing: 6) {
@@ -368,24 +368,21 @@ struct BreakPanelView: View {
 
             if !isBreak {
                 iconButton("xmark", help: "Close") { onCollapse?() }
-            } else if canSkipBreak {
-                iconButton("xmark", help: "Skip this break") {
-                    model.engine.skip()
+            } else {
+                // Not the Close xmark: skipping is destructive, and sharing the glyph
+                // would teach muscle memory that silently cancels breaks. Held in the
+                // row (inert, faded out) through the praise/ignored hold so the gear
+                // does not slide under a cursor that was aiming at skip.
+                iconButton("forward.end.fill", help: "Skip this break") {
+                    model.skipBreak()
                 }
+                .disabled(!model.phase.isSkippable)
+                .opacity(model.phase.isSkippable ? 1 : 0)
             }
         }
     }
 
     private var isPaused: Bool { model.phase == .paused }
-
-    /// Only the warning and the rest itself can be skipped; during the praise/ignored
-    /// hold the break is already over and skipping would mean nothing.
-    private var canSkipBreak: Bool {
-        switch model.phase {
-        case .warning, .resting: return true
-        default: return false
-        }
-    }
 
     private func iconButton(
         _ symbol: String,

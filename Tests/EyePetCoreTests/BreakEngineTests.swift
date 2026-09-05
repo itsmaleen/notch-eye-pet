@@ -263,8 +263,8 @@ final class BreakEngineTests: XCTestCase {
     /// clock without passing through `.praise`/`.ignored`, so nothing is recorded.
     func testSkipDuringRestResetsTheClock() {
         let engine = BreakEngine(schedule: .init(workInterval: 20, breakDuration: 10, warningLead: 1))
-        for _ in 0..<21 { engine.tick(delta: 1, sample: sample(idle: 1)) }
-        for _ in 0..<3 { engine.tick(delta: 1, sample: sample(idle: 1)) }
+        // 20 ticks to accrue, one to clear the warning, three into the rest.
+        for _ in 0..<24 { engine.tick(delta: 1, sample: sample(idle: 1)) }
         guard case .resting = engine.phase else { return XCTFail("expected resting, got \(engine.phase)") }
 
         engine.skip()
@@ -284,6 +284,43 @@ final class BreakEngineTests: XCTestCase {
 
         engine.skip()
         XCTAssertEqual(engine.phase, .working(progress: 0))
+    }
+
+    /// Skipping while paused must not fabricate a running phase: `tick` early-returns
+    /// while paused, so `.working` here would wedge the engine behind a UI that
+    /// claims the clock is running.
+    func testSkipWhilePausedStaysPausedAndResumesCleanly() {
+        let engine = BreakEngine(schedule: .init(workInterval: 20, breakDuration: 5, warningLead: 1))
+        for _ in 0..<10 { engine.tick(delta: 1, sample: sample(idle: 1)) }
+        engine.pause()
+        engine.skip()
+        XCTAssertEqual(engine.phase, .paused)
+
+        engine.resume()
+        engine.tick(delta: 1, sample: sample(idle: 1))
+        guard case .working = engine.phase else {
+            return XCTFail("expected working after resume, got \(engine.phase)")
+        }
+    }
+
+    /// A click that lands just as the rest expires must not cut the reward short.
+    func testSkipDuringPraiseHoldIsANoOp() {
+        let engine = BreakEngine(schedule: .init(workInterval: 20, breakDuration: 5, warningLead: 1))
+        for _ in 0..<21 { engine.tick(delta: 1, sample: sample(idle: 1)) }
+        for step in 1...5 { engine.tick(delta: 1, sample: sample(idle: TimeInterval(step))) }
+        guard case .praise = engine.phase else { return XCTFail("expected praise, got \(engine.phase)") }
+
+        engine.skip()
+        XCTAssertEqual(engine.phase, .praise)
+    }
+
+    func testSkippabilityCoversExactlyTheWarningAndTheRest() {
+        XCTAssertTrue(BreakPhase.warning(remaining: 3).isSkippable)
+        XCTAssertTrue(BreakPhase.resting(remaining: 3).isSkippable)
+        XCTAssertFalse(BreakPhase.working(progress: 0.5).isSkippable)
+        XCTAssertFalse(BreakPhase.praise.isSkippable)
+        XCTAssertFalse(BreakPhase.ignored.isSkippable)
+        XCTAssertFalse(BreakPhase.paused.isSkippable)
     }
 
     // MARK: - Mood
