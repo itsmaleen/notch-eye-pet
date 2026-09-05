@@ -342,9 +342,11 @@ struct BreakPanelView: View {
         .onHover { if $0 { onInteraction?() } }
     }
 
-    /// During a break this is the gear alone, deliberately quiet: the instruction is to
-    /// look away from the screen, so controls must not invite looking back at it.
-    /// Otherwise it is the full set, since the panel was opened on purpose.
+    /// During a break the chrome stays deliberately quiet — the instruction is to look
+    /// away from the screen, so controls must not invite looking back at it — except
+    /// for one full-brightness skip button: a break with no way out is the kind that
+    /// gets the app disabled, and retention is the product. Otherwise it is the full
+    /// set, since the panel was opened on purpose.
     @ViewBuilder
     private var controls: some View {
         HStack(spacing: 6) {
@@ -366,6 +368,16 @@ struct BreakPanelView: View {
 
             if !isBreak {
                 iconButton("xmark", help: "Close") { onCollapse?() }
+            } else {
+                // Not the Close xmark: skipping is destructive, and sharing the glyph
+                // would teach muscle memory that silently cancels breaks. Held in the
+                // row (inert, faded out) through the praise/ignored hold so the gear
+                // does not slide under a cursor that was aiming at skip.
+                iconButton("forward.end.fill", help: "Skip this break") {
+                    model.skipBreak()
+                }
+                .disabled(!model.phase.isSkippable)
+                .opacity(model.phase.isSkippable ? 1 : 0)
             }
         }
     }

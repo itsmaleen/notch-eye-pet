@@ -113,6 +113,13 @@ final class AppModel: ObservableObject {
         tick()
     }
 
+    /// The panel's and the menu's skip: mutate the engine, then flush immediately so
+    /// the notch collapses on the click instead of up to a tick interval later.
+    func skipBreak() {
+        engine.skip()
+        tick()
+    }
+
     /// Granularity the published `progress` is rounded to.
     ///
     /// The engine recomputes a fresh fraction every tick, so an unrounded value changes

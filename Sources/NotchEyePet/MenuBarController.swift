@@ -137,7 +137,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // rebuilds from scratch.
 
     @objc private func breakNow() { model.engine.breakNow() }
-    @objc private func skip() { model.engine.skip() }
+    @objc private func skip() { model.skipBreak() }
 
     @objc private func togglePause() {
         if isPaused { model.resume() } else { model.pause() }
